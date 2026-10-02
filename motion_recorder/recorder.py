@@ -180,22 +180,32 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def segment_files(include_open=False):
-    files = []
-    now = time.time()
+    entries = []
 
     for path in BUFFER_DIR.glob("*.ts"):
         try:
             stat = path.stat()
-            if not include_open:
-                if stat.st_size == 0:
-                    continue
-                if now - stat.st_mtime < 0.5:
-                    continue
-            files.append((stat.st_mtime, path))
+            entries.append((stat.st_mtime, stat.st_size, path))
         except OSError:
             pass
 
-    files.sort(key=lambda item: item[0])
+    entries.sort(key=lambda item: item[0])
+
+    if not entries:
+        return []
+
+    # The newest segment is the one FFmpeg may still be writing.
+    open_path = entries[-1][2] if not include_open else None
+
+    files = []
+
+    for mtime, size, path in entries:
+        if path == open_path:
+            continue
+        if size == 0:
+            continue
+        files.append((mtime, path))
+
     return files
 
 

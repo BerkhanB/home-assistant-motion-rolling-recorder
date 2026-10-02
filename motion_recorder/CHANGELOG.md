@@ -5,7 +5,7 @@
 - Move temporary rolling MPEG-TS buffer to memory-backed tmpfs (`/tmp/camera_motion_buffer`, `tmpfs: true`) to eliminate continuous flash drive write churn.
 - Automatically clean up any legacy disk-based `.motion_buffer` directory from prior versions.
 - Increase default segment target duration from 2 s to 4 s to reduce segment creation/deletion frequency.
-- Harden segment detection (`segment_files`): validate segment file size (`st_size > 0`) and modification age (`mtime < now - 0.5s`) instead of blindly dropping the newest entry.
+- Harden segment detection (`segment_files`): exclude the newest entry positionally (likely still being written by FFmpeg) and skip zero-size files, replacing the previous blind `files[:-1]` slice.
 - Add synchronous incident finalization failure detection with automatic retry scheduling (up to 3 attempts with delay) and protected retention of retry segments during buffer cleanup.
 - Update restart recovery: cleanly abandon pre-restart incidents on startup since the RAM buffer is wiped across container restarts.
 - Store concat manifest on tmpfs (`/tmp/concat.txt`) and remove after remuxing to avoid unnecessary flash writes in `/data`.
