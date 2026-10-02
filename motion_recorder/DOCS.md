@@ -3,11 +3,13 @@
 ## What it does
 
 The app keeps the RTSP stream open continuously and stores short temporary MPEG-TS
-segments under:
+segments in RAM under:
 
 ```text
-/media/recordings/.motion_buffer/
+/tmp/camera_motion_buffer/
 ```
+
+(Memory-backed via `tmpfs: true` in the app configuration, eliminating flash storage wear.)
 
 When Home Assistant sends a motion pulse to `POST /motion`, the app opens (or
 extends) an incident. When `post_roll` seconds have passed without another pulse,
@@ -44,7 +46,7 @@ stable LAN IP/DHCP reservation.
 - `stream`: `stream1` or `stream2`.
 - `pre_roll`: seconds retained before the first motion pulse. Default: 5.
 - `post_roll`: seconds to wait after the latest pulse. Default: 30.
-- `segment_seconds`: target duration of temporary segments. Default: 2.
+- `segment_seconds`: target duration of temporary segments. Default: 4.
 The host port defaults to 8099. If that port is already in use, change the host
 mapping in the app's Network settings and use the same host port in Home
 Assistant's `rest_command` URL.
@@ -52,7 +54,8 @@ Assistant's `rest_command` URL.
 ## Home Assistant configuration
 
 Add this to `configuration.yaml`, replacing `HOME_ASSISTANT_IP` with the LAN IP
-of the Home Assistant host:
+of the Home Assistant host (do not use `127.0.0.1`, because Home Assistant Core
+and apps run in separate container network namespaces):
 
 ```yaml
 rest_command:
@@ -93,8 +96,8 @@ Restart Home Assistant (or reload REST commands where available) after adding
    [http] listening on port 8099
    ```
 
-3. Check `/media/recordings/.motion_buffer/`. New `.ts` segments should appear
-   and old idle segments should be removed automatically.
+3. Check the app logs or `/tmp/camera_motion_buffer/` inside the container.
+   New `.ts` segments should appear and old idle segments should be removed automatically.
 4. Test the API from another machine:
 
    ```powershell
@@ -151,15 +154,36 @@ incident before that sensor returns to `off`. Cameras that emit repeated motion
 pulses do not normally hit this limitation. State-aware `on/off` tracking is
 planned for a future release.
 
-## Storage
+## Storage and RAM buffer
 
-While idle, only roughly the most recent minute of temporary segments is kept.
-During an active incident, all segments needed to build that incident are
-preserved until the MP4 is created.
+- **Temporary rolling buffer**: Temporary MPEG-TS segments are written to
+  `/tmp/camera_motion_buffer/`. Because `tmpfs: true` is configured, `/tmp` is
+  memory-backed (RAM), eliminating flash storage write cycles and continuous
+  filesystem churn.
+- **Idle retention**: While idle, only roughly the most recent minute of temporary
+  segments is kept.
+- **Active incident retention**: During an active incident (or while retrying
+  finalization), all segments needed from pre-roll onward are preserved in memory
+  until the MP4 is created.
+- **App restart behavior**: Because the rolling buffer resides in RAM (tmpfs),
+  container restarts clear all in-memory segments. Any unfinished incident
+  recorded prior to a restart is cleanly abandoned on startup rather than
+  attempting to stitch missing segments.
+- **Final MP4 retention**: Final MP4 files are written to `/media/recordings/` on
+  persistent storage. Retention of final MP4s is intentionally left to the
+  user/Home Assistant.
 
-Final MP4 retention is intentionally left to the user/Home Assistant. If you
-already have a size-based cleanup job for `/media/recordings/*.mp4`, it can
-continue to manage the final files.
+## Incident finalization & retry
+
+Incident finalization remuxes buffered segments into the final MP4 synchronously:
+- If finalization succeeds, the completed MP4 is moved to
+  `/media/recordings/motion_<timestamp>.mp4`.
+- If finalization encounters a transient failure (e.g., segment muxing delay),
+  the incident is preserved and scheduled for retry (up to 3 attempts with a
+  delay). Segments needed by the incident remain protected in the buffer until
+  rendering succeeds or retries are exhausted.
+- If fresh motion pulses arrive while an older incident is rendering, the new
+  motion pulse starts a distinct incident cleanly without race conditions.
 
 ## Security
 

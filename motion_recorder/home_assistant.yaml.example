@@ -2,6 +2,7 @@
 # configuration.yaml
 # -----------------------------------------------------------------------------
 # Replace HOME_ASSISTANT_IP with the LAN IP of the Home Assistant host.
+# Note: Do not use 127.0.0.1; Home Assistant Core and apps run in separate container namespaces.
 
 rest_command:
   motion_rolling_recorder_pulse:

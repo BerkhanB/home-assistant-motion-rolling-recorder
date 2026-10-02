@@ -40,6 +40,6 @@ jobs:
       - name: Build amd64 app image
         run: |
           docker build \
-            --build-arg BUILD_VERSION=0.2.0 \
+            --build-arg BUILD_VERSION=0.3.0 \
             --build-arg BUILD_ARCH=amd64 \
             motion_recorder

@@ -10,6 +10,7 @@ Features:
 - one final MP4 per incident instead of fixed-length clip chains,
 - video stream copy (no video re-encoding),
 - G.711 A-law camera audio converted to AAC for MP4 compatibility,
+- memory-backed rolling buffer (`tmpfs`) to prevent flash storage wear,
 - automatic cleanup of temporary rolling-buffer segments,
 - final recordings stored under `/media/recordings`.
 

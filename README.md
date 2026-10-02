@@ -20,6 +20,7 @@ expires, the app remuxes the relevant segments into one MP4.
 - One MP4 per incident.
 - No video transcoding (`-c:v copy`).
 - G.711 A-law audio converted to AAC for MP4 compatibility.
+- Rolling segment ring buffer in RAM (`tmpfs`) to prevent flash storage wear.
 - Automatic temporary-buffer cleanup.
 - Final files written to `/media/recordings`.
 - `amd64` and `aarch64` Home Assistant OS architectures.
@@ -50,7 +51,7 @@ forward this port from your router to the public Internet.
 RTSP camera
     |
     v
-continuous FFmpeg segment buffer (~2 s pieces)
+continuous FFmpeg segment buffer (~4 s pieces in RAM /tmp)
     |
     +--- idle: retain ~60 s only
     |

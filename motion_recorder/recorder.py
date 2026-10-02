@@ -22,14 +22,27 @@ PASSWORD = cfg["camera_password"]
 STREAM = cfg.get("stream", "stream1")
 PRE_ROLL = float(cfg.get("pre_roll", 5))
 POST_ROLL = float(cfg.get("post_roll", 30))
-SEGMENT_SECONDS = float(cfg.get("segment_seconds", 2))
+SEGMENT_SECONDS = float(cfg.get("segment_seconds", 4))
 PORT = 8099
 
 OUTPUT_DIR = Path("/media/recordings")
-BUFFER_DIR = OUTPUT_DIR / ".motion_buffer"
+BUFFER_DIR = Path("/tmp/camera_motion_buffer")
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 BUFFER_DIR.mkdir(parents=True, exist_ok=True)
+
+# Clean up legacy disk-based buffer directory from pre-0.3.0 versions if present
+legacy_buffer = OUTPUT_DIR / ".motion_buffer"
+if legacy_buffer.exists():
+    try:
+        for old_file in legacy_buffer.glob("*.ts"):
+            try:
+                old_file.unlink()
+            except OSError:
+                pass
+        legacy_buffer.rmdir()
+    except OSError:
+        pass
 
 RTSP_URL = (
     f"rtsp://{quote(USERNAME, safe='')}:{quote(PASSWORD, safe='')}"
@@ -65,18 +78,24 @@ def load_state():
     global first_motion, last_motion
 
     try:
-        with STATE_FILE.open("r", encoding="utf-8") as f:
-            state = json.load(f)
+        if STATE_FILE.exists():
+            with STATE_FILE.open("r", encoding="utf-8") as f:
+                state = json.load(f)
 
-        first_motion = state.get("first_motion")
-        last_motion = state.get("last_motion")
+            recovered_first = state.get("first_motion")
+            recovered_last = state.get("last_motion")
 
-        if first_motion is not None:
-            log(
-                "[state] recovered unfinished incident "
-                f"first={first_motion} last={last_motion}"
-            )
-    except (FileNotFoundError, json.JSONDecodeError):
+            if recovered_first is not None:
+                log(
+                    "[state] abandoned unfinished incident from prior run "
+                    f"(first={recovered_first} last={recovered_last}); "
+                    "RAM buffer was cleared on restart"
+                )
+
+        first_motion = None
+        last_motion = None
+        save_state()
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         first_motion = None
         last_motion = None
 
@@ -162,20 +181,21 @@ class Handler(BaseHTTPRequestHandler):
 
 def segment_files(include_open=False):
     files = []
+    now = time.time()
 
     for path in BUFFER_DIR.glob("*.ts"):
         try:
-            files.append((path.stat().st_mtime, path))
-        except FileNotFoundError:
+            stat = path.stat()
+            if not include_open:
+                if stat.st_size == 0:
+                    continue
+                if now - stat.st_mtime < 0.5:
+                    continue
+            files.append((stat.st_mtime, path))
+        except OSError:
             pass
 
     files.sort(key=lambda item: item[0])
-
-    # FFmpeg is normally writing the newest file right now.
-    # Never concatenate/delete that file until a newer segment exists.
-    if not include_open and len(files) >= 1:
-        files = files[:-1]
-
     return files
 
 
@@ -306,7 +326,7 @@ def finalize_incident(start_motion, end_motion):
     # the requested post-roll boundary.
     covered = wait_for_closed_segment_covering(
         desired_end,
-        timeout=max(20, SEGMENT_SECONDS * 5),
+        timeout=max(20, int(SEGMENT_SECONDS * 5)),
     )
 
     if not covered:
@@ -316,70 +336,87 @@ def finalize_incident(start_motion, end_motion):
 
     if not segments:
         log("[event] ERROR: no closed buffered segments found")
-        return
+        return False
 
-    concat_file = Path("/data/concat.txt")
+    concat_file = Path("/tmp/concat.txt")
 
-    with concat_file.open("w", encoding="utf-8") as f:
-        for path in segments:
-            # Generated buffer paths contain no single quotes.
-            f.write(f"file '{path}'\n")
+    try:
+        with concat_file.open("w", encoding="utf-8") as f:
+            for path in segments:
+                # Generated buffer paths contain no single quotes.
+                f.write(f"file '{path}'\n")
 
-    final_path = unique_output(start_motion)
-    temp_path = final_path.with_suffix(".tmp.mp4")
+        final_path = unique_output(start_motion)
+        temp_path = final_path.with_suffix(".tmp.mp4")
 
-    # Video and audio were already normalized in the rolling buffer.
-    # Copy both streams into the final MP4 without re-encoding.
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "warning",
-        "-nostdin",
+        # Video and audio were already normalized in the rolling buffer.
+        # Copy both streams into the final MP4 without re-encoding.
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-nostdin",
 
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(concat_file),
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_file),
 
-        "-map", "0:v:0",
-        "-map", "0:a?",
-        "-c:v", "copy",
-        "-c:a", "copy",
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-c:v", "copy",
+            "-c:a", "copy",
 
-        "-movflags", "+faststart",
-        "-y",
-        str(temp_path),
-    ]
+            "-movflags", "+faststart",
+            "-y",
+            str(temp_path),
+        ]
 
-    log(
-        f"[event] combining {len(segments)} segments "
-        f"into {final_path.name}"
-    )
+        log(
+            f"[event] combining {len(segments)} segments "
+            f"into {final_path.name}"
+        )
 
-    result = subprocess.run(cmd)
+        result = subprocess.run(cmd)
 
-    if result.returncode == 0 and temp_path.exists():
-        temp_path.replace(final_path)
-        log(f"[event] saved {final_path}")
-    else:
-        log(f"[event] ERROR: final ffmpeg returned {result.returncode}")
+        if result.returncode == 0 and temp_path.exists():
+            temp_path.replace(final_path)
+            log(f"[event] saved {final_path}")
+            return True
+        else:
+            log(f"[event] ERROR: final ffmpeg returned {result.returncode}")
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+            return False
+    finally:
         try:
-            temp_path.unlink()
-        except FileNotFoundError:
+            concat_file.unlink()
+        except OSError:
             pass
 
 
-def cleanup_buffer():
+def cleanup_buffer(protected_start=None):
     with lock:
         active_start = first_motion
 
+    if active_start is not None and protected_start is not None:
+        candidate_start = min(active_start, protected_start)
+    elif active_start is not None:
+        candidate_start = active_start
+    elif protected_start is not None:
+        candidate_start = protected_start
+    else:
+        candidate_start = None
+
     # Normal idle buffer: ~60 seconds.
-    # During an incident, retain every segment needed from pre-roll onward,
+    # During an incident or retry, retain every segment needed from pre-roll onward,
     # no matter how long the incident lasts.
-    if active_start is None:
+    if candidate_start is None:
         cutoff = time.time() - max(60, PRE_ROLL + 20)
     else:
         cutoff = (
-            active_start
+            candidate_start
             - PRE_ROLL
             - max(5, SEGMENT_SECONDS * 2)
         )
@@ -392,35 +429,86 @@ def cleanup_buffer():
 
         try:
             path.unlink()
-        except FileNotFoundError:
+        except OSError:
             pass
+
+
+MAX_RETRIES = 3
+RETRY_DELAY = 3.0
 
 
 def monitor():
     global first_motion, last_motion
 
+    pending_retry = None  # (start_motion, end_motion)
+    retry_count = 0
+    next_retry_time = 0.0
+
     while not stop_event.is_set():
+        now = time.time()
         job = None
 
         with lock:
             if (
                 first_motion is not None
                 and last_motion is not None
-                and time.time() >= last_motion + POST_ROLL
+                and now >= last_motion + POST_ROLL
             ):
                 job = (first_motion, last_motion)
 
                 # Clear the incident BEFORE rendering it.
-                # If a fresh pulse now arrives after the 30-second gap,
+                # If a fresh pulse arrives during or after rendering,
                 # it correctly becomes a new incident.
                 first_motion = None
                 last_motion = None
                 save_state()
 
-        if job is not None:
-            finalize_incident(*job)
+                # If an older failed job was still pending retry, drop it in favor of the newer incident
+                if pending_retry is not None:
+                    log(
+                        "[event] WARNING: discarding previous failed incident "
+                        f"to prioritize newer incident {job[0]}"
+                    )
+                    pending_retry = None
+                    retry_count = 0
 
-        cleanup_buffer()
+        # If no new incident is ready to render, check if a retry is scheduled
+        if job is None and pending_retry is not None and now >= next_retry_time:
+            job = pending_retry
+
+        if job is not None:
+            is_retry = (pending_retry is not None and job == pending_retry)
+            success = finalize_incident(*job)
+
+            if success:
+                if is_retry:
+                    log(f"[event] retry succeeded for incident {job[0]}")
+                    pending_retry = None
+                    retry_count = 0
+            else:
+                # Rendering failed
+                if is_retry:
+                    retry_count += 1
+                else:
+                    pending_retry = job
+                    retry_count = 1
+
+                if retry_count < MAX_RETRIES:
+                    next_retry_time = time.time() + RETRY_DELAY
+                    log(
+                        f"[event] scheduling retry {retry_count}/{MAX_RETRIES} "
+                        f"for incident in {RETRY_DELAY:.1f}s"
+                    )
+                else:
+                    log(
+                        f"[event] ERROR: incident failed after {MAX_RETRIES} attempts; "
+                        "abandoning"
+                    )
+                    pending_retry = None
+                    retry_count = 0
+
+        protected_start = pending_retry[0] if pending_retry is not None else None
+        cleanup_buffer(protected_start=protected_start)
         time.sleep(1)
 
 

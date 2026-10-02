@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+- Move temporary rolling MPEG-TS buffer to memory-backed tmpfs (`/tmp/camera_motion_buffer`, `tmpfs: true`) to eliminate continuous flash drive write churn.
+- Automatically clean up any legacy disk-based `.motion_buffer` directory from prior versions.
+- Increase default segment target duration from 2 s to 4 s to reduce segment creation/deletion frequency.
+- Harden segment detection (`segment_files`): validate segment file size (`st_size > 0`) and modification age (`mtime < now - 0.5s`) instead of blindly dropping the newest entry.
+- Add synchronous incident finalization failure detection with automatic retry scheduling (up to 3 attempts with delay) and protected retention of retry segments during buffer cleanup.
+- Update restart recovery: cleanly abandon pre-restart incidents on startup since the RAM buffer is wiped across container restarts.
+- Store concat manifest on tmpfs (`/tmp/concat.txt`) and remove after remuxing to avoid unnecessary flash writes in `/data`.
+- Maintain proven AAC + asynchronous audio resampling pipeline (`aresample=async=1:first_pts=0`) and atomic incident detachment architecture.
+
 ## 0.2.3
 
 - Preserve the RTSP demuxer time base during video stream copy with FFmpeg `-copytb 1`.
