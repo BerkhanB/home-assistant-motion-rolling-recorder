@@ -190,6 +190,8 @@ def segmenter():
             "-hide_banner",
             "-loglevel", "warning",
             "-nostdin",
+            "-fflags", "+genpts+igndts",
+            "-use_wallclock_as_timestamps", "1",
             "-rtsp_transport", "tcp",
             "-i", RTSP_URL,
 
@@ -201,6 +203,7 @@ def segmenter():
             # which can disappear during the later concat/remux step.
             # Convert only the low-rate mono audio to AAC while buffering.
             "-c:v", "copy",
+            "-af", "aresample=async=1:first_pts=0",
             "-c:a", "aac",
             "-b:a", "32k",
             "-ac", "1",
@@ -326,8 +329,8 @@ def finalize_incident(start_motion, end_motion):
     final_path = unique_output(start_motion)
     temp_path = final_path.with_suffix(".tmp.mp4")
 
-    # Keep video bit-for-bit; convert only audio to AAC so the result
-    # remains broadly compatible with MP4 even if Tapo uses another codec.
+    # Video and audio were already normalized in the rolling buffer.
+    # Copy both streams into the final MP4 without re-encoding.
     cmd = [
         "ffmpeg",
         "-hide_banner",
