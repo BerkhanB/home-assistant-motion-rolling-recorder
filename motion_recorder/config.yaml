@@ -1,0 +1,43 @@
+name: Motion Rolling Recorder
+version: "0.2.0"
+slug: motion_recorder
+description: Rolling RTSP pre-buffer recorder that creates one MP4 per motion incident.
+init: false
+arch:
+  - aarch64
+  - amd64
+startup: services
+boot: auto
+stage: experimental
+
+map:
+  - type: media
+    read_only: false
+
+# Exposed on the Home Assistant host so Home Assistant Core can call the
+# motion endpoint regardless of the repository-specific internal DNS name.
+# Do not port-forward this port from your router to the Internet.
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: Motion event API
+
+webui: "http://[HOST]:[PORT:8099]/health"
+
+options:
+  camera_ip: null
+  camera_username: null
+  camera_password: null
+  stream: stream1
+  pre_roll: 5
+  post_roll: 30
+  segment_seconds: 2
+
+schema:
+  camera_ip: str
+  camera_username: str
+  camera_password: password
+  stream: "list(stream1|stream2)"
+  pre_roll: "int(0,30)"
+  post_roll: "int(1,300)"
+  segment_seconds: "int(1,10)"

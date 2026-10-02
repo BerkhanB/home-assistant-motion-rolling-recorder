@@ -1,0 +1,30 @@
+# -----------------------------------------------------------------------------
+# configuration.yaml
+# -----------------------------------------------------------------------------
+# Replace HOME_ASSISTANT_IP with the LAN IP of the Home Assistant host.
+
+rest_command:
+  motion_rolling_recorder_pulse:
+    url: "http://HOME_ASSISTANT_IP:8099/motion"
+    method: POST
+    headers:
+      Content-Type: application/json
+    payload: "{}"
+    timeout: 2
+
+# -----------------------------------------------------------------------------
+# automations.yaml
+# -----------------------------------------------------------------------------
+# Replace the example binary_sensor entity with your motion sensor.
+# Every transition to ON refreshes the app's post-roll deadline.
+
+- id: motion_rolling_recorder_on_motion
+  alias: "Camera: Motion Rolling Recorder"
+  mode: parallel
+  max: 20
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.YOUR_CAMERA_MOTION_SENSOR
+      to: "on"
+  actions:
+    - action: rest_command.motion_rolling_recorder_pulse

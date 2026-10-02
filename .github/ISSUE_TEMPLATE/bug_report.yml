@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a reproducible recorder or camera compatibility problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include camera passwords, Home Assistant tokens, or other secrets.
+  - type: input
+    id: camera
+    attributes:
+      label: Camera model
+      placeholder: e.g. Tapo C200C
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Home Assistant architecture
+      options:
+        - amd64
+        - aarch64
+        - Unknown
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      placeholder: 0.2.0
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include expected and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      render: shell
+      description: Paste only the short section around the problem. Redact secrets.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed passwords, tokens and other secrets from this report.
+          required: true
