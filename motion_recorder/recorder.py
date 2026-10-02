@@ -190,7 +190,7 @@ def segmenter():
             "-hide_banner",
             "-loglevel", "warning",
             "-nostdin",
-            "-fflags", "+genpts+igndts",
+            "-fflags", "+genpts",
             "-use_wallclock_as_timestamps", "1",
             "-rtsp_transport", "tcp",
             "-i", RTSP_URL,

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Stop discarding RTSP DTS values during stream copy.
+- Retain generated PTS and wall-clock input timestamps.
+- Keep asynchronous audio resampling for discontinuous camera timestamps.
+- Fix unset video timestamps introduced by the 0.2.1 timestamp experiment.
+
 ## 0.2.1
 
 - Add FFmpeg-generated timestamps and ignore problematic input DTS where appropriate.
