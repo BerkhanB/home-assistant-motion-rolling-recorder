@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3
+
+- Preserve the RTSP demuxer time base during video stream copy with FFmpeg `-copytb 1`.
+- Further reduce startup and stream-copy DTS monotonicity issues without re-encoding video.
+- Keep wall-clock input timestamps and asynchronous audio resampling unchanged from 0.2.2.
+
 ## 0.2.2
 
 - Stop discarding RTSP DTS values during stream copy.

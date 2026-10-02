@@ -190,18 +190,17 @@ def segmenter():
             "-hide_banner",
             "-loglevel", "warning",
             "-nostdin",
+
             "-fflags", "+genpts",
             "-use_wallclock_as_timestamps", "1",
             "-rtsp_transport", "tcp",
             "-i", RTSP_URL,
 
+            "-copytb", "1",
+
             "-map", "0:v:0",
             "-map", "0:a?",
 
-            # Keep video bit-for-bit. Tapo exposes G.711 A-law audio on
-            # many models; MPEG-TS treats pcm_alaw as a private stream,
-            # which can disappear during the later concat/remux step.
-            # Convert only the low-rate mono audio to AAC while buffering.
             "-c:v", "copy",
             "-af", "aresample=async=1:first_pts=0",
             "-c:a", "aac",
