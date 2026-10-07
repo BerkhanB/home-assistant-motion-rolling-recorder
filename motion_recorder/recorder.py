@@ -265,7 +265,7 @@ def segmenter():
             "-fflags", "+genpts",
             "-use_wallclock_as_timestamps", "1",
             "-rtsp_transport", "tcp",
-            "-stimeout", "10000000",
+            "-timeout", "10000000",
             "-i", RTSP_URL,
 
             "-copytb", "1",

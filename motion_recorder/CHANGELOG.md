@@ -2,7 +2,7 @@
 
 ## 0.3.1
 
-- Add FFmpeg RTSP socket timeout (`-stimeout 10000000`, 10 s) to automatically abort hung socket reads on silent connection drops or camera reboot.
+- Add FFmpeg RTSP socket timeout (`-timeout 10000000`, 10 s) to automatically abort hung socket reads on silent connection drops or camera reboot.
 - Add Python-level stream watchdog (`latest_segment_time`) that monitors segment generation and automatically terminates/restarts FFmpeg if no segment updates appear within `STALL_THRESHOLD` (15+ seconds).
 - Add progressive backoff for RTSP reconnections (5 s up to 30 s) when the camera is offline to reduce CPU and log spam.
 - Enhance `/health` endpoint with real-time stream status (`ok`, `stream_healthy`, `stream_status`, and `last_segment_age_seconds`).
