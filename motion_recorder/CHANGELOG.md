@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2
+
+- Switch RTSP socket timeout to `-timeout 10000000` (replacing deprecated `-stimeout` removed in newer FFmpeg builds).
+
 ## 0.3.1
 
 - Add FFmpeg RTSP socket timeout (`-timeout 10000000`, 10 s) to automatically abort hung socket reads on silent connection drops or camera reboot.
