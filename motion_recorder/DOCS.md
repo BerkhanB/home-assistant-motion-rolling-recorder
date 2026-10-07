@@ -104,6 +104,19 @@ Restart Home Assistant (or reload REST commands where available) after adding
    Invoke-RestMethod -Uri "http://HOME_ASSISTANT_IP:8099/health"
    ```
 
+   The response indicates real-time streaming health:
+   ```json
+   {
+     "ok": true,
+     "stream_healthy": true,
+     "stream_status": "healthy",
+     "last_segment_age_seconds": 1.5,
+     "incident_active": false,
+     "first_motion": null,
+     "last_motion": null
+   }
+   ```
+
 5. Trigger a pulse:
 
    ```powershell

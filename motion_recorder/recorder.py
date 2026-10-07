@@ -55,6 +55,12 @@ stop_event = threading.Event()
 first_motion = None
 last_motion = None
 ffmpeg_proc = None
+proc_started_at = time.time()
+
+INITIAL_RETRY_DELAY = 5.0
+MAX_RETRY_DELAY = 30.0
+STALL_THRESHOLD = max(15.0, SEGMENT_SECONDS * 3 + 5)
+STARTUP_GRACE_PERIOD = max(20.0, SEGMENT_SECONDS * 3 + 10)
 
 
 def log(msg):
@@ -159,9 +165,31 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        now = time.time()
+        last_seg = latest_segment_time()
+
         with lock:
+            ffmpeg_running = (ffmpeg_proc is not None) and (ffmpeg_proc.poll() is None)
+            seg_age = round(max(0.0, now - last_seg), 1) if last_seg > 0 else None
+
+            if not ffmpeg_running:
+                stream_healthy = False
+                stream_status = "stopped"
+            elif last_seg > 0 and (now - last_seg <= STALL_THRESHOLD):
+                stream_healthy = True
+                stream_status = "healthy"
+            elif last_seg == 0 and (now - proc_started_at <= STARTUP_GRACE_PERIOD):
+                stream_healthy = True
+                stream_status = "starting"
+            else:
+                stream_healthy = False
+                stream_status = "stalled"
+
             body = {
-                "ok": True,
+                "ok": stream_healthy,
+                "stream_healthy": stream_healthy,
+                "stream_status": stream_status,
+                "last_segment_age_seconds": seg_age,
                 "incident_active": first_motion is not None,
                 "first_motion": first_motion,
                 "last_motion": last_motion,
@@ -177,6 +205,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         return
+
+
+def latest_segment_time():
+    latest = 0.0
+    for path in BUFFER_DIR.glob("*.ts"):
+        try:
+            stat = path.stat()
+            if stat.st_size > 0 and stat.st_mtime > latest:
+                latest = stat.st_mtime
+        except OSError:
+            pass
+    return latest
 
 
 def segment_files(include_open=False):
@@ -210,9 +250,10 @@ def segment_files(include_open=False):
 
 
 def segmenter():
-    global ffmpeg_proc
+    global ffmpeg_proc, proc_started_at
 
     pattern = str(BUFFER_DIR / "%Y%m%dT%H%M%S.ts")
+    retry_delay = INITIAL_RETRY_DELAY
 
     while not stop_event.is_set():
         cmd = [
@@ -224,6 +265,7 @@ def segmenter():
             "-fflags", "+genpts",
             "-use_wallclock_as_timestamps", "1",
             "-rtsp_transport", "tcp",
+            "-stimeout", "10000000",
             "-i", RTSP_URL,
 
             "-copytb", "1",
@@ -247,12 +289,35 @@ def segmenter():
         ]
 
         log("[ffmpeg] starting RTSP rolling segmenter")
-        ffmpeg_proc = subprocess.Popen(cmd)
+        with lock:
+            proc_started_at = time.time()
+            ffmpeg_proc = subprocess.Popen(cmd)
 
+        stalled = False
         while not stop_event.is_set():
             rc = ffmpeg_proc.poll()
             if rc is not None:
                 break
+
+            now = time.time()
+            last_seg = latest_segment_time()
+
+            if last_seg > 0:
+                if now - last_seg > STALL_THRESHOLD:
+                    log(
+                        f"[watchdog] WARNING: stream stalled (no segment updates for "
+                        f"{int(now - last_seg)}s); killing FFmpeg"
+                    )
+                    stalled = True
+                    break
+            elif now - proc_started_at > STARTUP_GRACE_PERIOD:
+                log(
+                    f"[watchdog] WARNING: stream startup timed out (no segments produced in "
+                    f"{int(now - proc_started_at)}s); killing FFmpeg"
+                )
+                stalled = True
+                break
+
             time.sleep(1)
 
         if stop_event.is_set():
@@ -264,8 +329,27 @@ def segmenter():
                     ffmpeg_proc.kill()
             return
 
-        log(f"[ffmpeg] exited rc={rc}; retrying in 5 seconds")
-        time.sleep(5)
+        if stalled and ffmpeg_proc.poll() is None:
+            ffmpeg_proc.terminate()
+            try:
+                ffmpeg_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log("[watchdog] FFmpeg did not exit on SIGTERM; killing with SIGKILL")
+                ffmpeg_proc.kill()
+                try:
+                    ffmpeg_proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+
+        rc = ffmpeg_proc.poll()
+
+        run_duration = time.time() - proc_started_at
+        if run_duration >= 30.0 and latest_segment_time() > proc_started_at:
+            retry_delay = INITIAL_RETRY_DELAY
+
+        log(f"[ffmpeg] exited rc={rc}; retrying in {int(retry_delay)} seconds")
+        stop_event.wait(retry_delay)
+        retry_delay = min(MAX_RETRY_DELAY, retry_delay * 2)
 
 
 def wait_for_closed_segment_covering(target_ts, timeout=20):
