@@ -13,6 +13,18 @@ rest_command:
     payload: "{}"
     timeout: 2
 
+# Optional Home Assistant safety net: monitor stream health via /health endpoint.
+# Reports ON when the stream is actively recording segments or in startup grace.
+binary_sensor:
+  - platform: rest
+    name: Motion Recorder Stream Healthy
+    unique_id: motion_recorder_stream_healthy
+    resource: "http://HOME_ASSISTANT_IP:8099/health"
+    scan_interval: 30
+    timeout: 3
+    value_template: >
+      {{ value_json.ok | default(false) and value_json.stream_healthy | default(false) }}
+
 # -----------------------------------------------------------------------------
 # automations.yaml
 # -----------------------------------------------------------------------------
@@ -29,3 +41,31 @@ rest_command:
       to: "on"
   actions:
     - action: rest_command.motion_rolling_recorder_pulse
+
+# Optional auto-recovery automation (defense in depth):
+# Automatically restarts the add-on/app if the stream remains unhealthy or
+# unavailable for 60 seconds.
+#
+# Replace the app slug (e.g. b85c98ee_motion_recorder) with your installation's
+# slug found in Settings -> Add-ons / Apps -> Motion Rolling Recorder (or in the browser URL).
+# Note: Newer Home Assistant versions use 'action: hassio.app_restart' with 'app: ...'.
+# Earlier versions use 'action: hassio.addon_restart' with 'addon: ...'.
+
+- id: motion_recorder_auto_recover
+  alias: "Motion Recorder: Auto Recover"
+  description: Restart Motion Rolling Recorder if its stream remains unhealthy.
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.motion_recorder_stream_healthy
+      to: "off"
+      for: "00:01:00"
+    - trigger: state
+      entity_id: binary_sensor.motion_recorder_stream_healthy
+      to: "unavailable"
+      for: "00:01:00"
+  actions:
+    - action: hassio.app_restart
+      data:
+        app: b85c98ee_motion_recorder
+    - delay: "00:01:30"

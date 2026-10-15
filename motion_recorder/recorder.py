@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import os
 import signal
 import subprocess
 import threading
@@ -55,12 +56,23 @@ stop_event = threading.Event()
 first_motion = None
 last_motion = None
 ffmpeg_proc = None
-proc_started_at = time.time()
+
+# Stream health & watchdog state (watchdog durations use monotonic time)
+ffmpeg_started_at = time.monotonic()
+last_segment_at = None
+stream_status = "starting"
+consecutive_failures = 0
+ffmpeg_stopped_at = 0.0
 
 INITIAL_RETRY_DELAY = 5.0
 MAX_RETRY_DELAY = 30.0
-STALL_THRESHOLD = max(15.0, SEGMENT_SECONDS * 3 + 5)
-STARTUP_GRACE_PERIOD = max(20.0, SEGMENT_SECONDS * 3 + 10)
+STALL_TIMEOUT = max(15.0, SEGMENT_SECONDS * 3 + 3)
+STARTUP_TIMEOUT = max(20.0, SEGMENT_SECONDS * 3 + 8)
+MAX_CONSECUTIVE_FAILURES = 3
+
+# Aliases for backwards compatibility
+STALL_THRESHOLD = STALL_TIMEOUT
+STARTUP_GRACE_PERIOD = STARTUP_TIMEOUT
 
 
 def log(msg):
@@ -165,30 +177,42 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        now = time.time()
-        last_seg = latest_segment_time()
+        now_mono = time.monotonic()
 
         with lock:
             ffmpeg_running = (ffmpeg_proc is not None) and (ffmpeg_proc.poll() is None)
-            seg_age = round(max(0.0, now - last_seg), 1) if last_seg > 0 else None
 
-            if not ffmpeg_running:
-                stream_healthy = False
-                stream_status = "stopped"
-            elif last_seg > 0 and (now - last_seg <= STALL_THRESHOLD):
-                stream_healthy = True
-                stream_status = "healthy"
-            elif last_seg == 0 and (now - proc_started_at <= STARTUP_GRACE_PERIOD):
-                stream_healthy = True
-                stream_status = "starting"
+            if ffmpeg_running:
+                if last_segment_at is not None:
+                    seg_age = round(max(0.0, now_mono - last_segment_at), 1)
+                    if now_mono - last_segment_at <= STALL_TIMEOUT:
+                        stream_healthy = True
+                        status_str = "healthy"
+                    else:
+                        stream_healthy = False
+                        status_str = "stalled"
+                else:
+                    seg_age = None
+                    if now_mono - ffmpeg_started_at <= STARTUP_TIMEOUT:
+                        stream_healthy = True
+                        status_str = "starting"
+                    else:
+                        stream_healthy = False
+                        status_str = "stalled"
             else:
-                stream_healthy = False
-                stream_status = "stalled"
+                seg_age = None
+                # Brief reconnect grace period during initial retry backoff
+                if consecutive_failures <= 1 and (now_mono - ffmpeg_stopped_at <= INITIAL_RETRY_DELAY):
+                    stream_healthy = True
+                    status_str = "reconnecting"
+                else:
+                    stream_healthy = False
+                    status_str = "stopped"
 
             body = {
                 "ok": stream_healthy,
                 "stream_healthy": stream_healthy,
-                "stream_status": stream_status,
+                "stream_status": status_str,
                 "last_segment_age_seconds": seg_age,
                 "incident_active": first_motion is not None,
                 "first_motion": first_motion,
@@ -197,7 +221,9 @@ class Handler(BaseHTTPRequestHandler):
 
         data = json.dumps(body).encode()
 
-        self.send_response(200)
+        # Return HTTP 200 when healthy or in initial startup/reconnect grace;
+        # Return HTTP 503 Service Unavailable when stream is stalled or stopped.
+        self.send_response(200 if stream_healthy else 503)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -250,10 +276,12 @@ def segment_files(include_open=False):
 
 
 def segmenter():
-    global ffmpeg_proc, proc_started_at
+    global ffmpeg_proc, ffmpeg_started_at, last_segment_at, stream_status
+    global consecutive_failures, ffmpeg_stopped_at
 
     pattern = str(BUFFER_DIR / "%Y%m%dT%H%M%S.ts")
     retry_delay = INITIAL_RETRY_DELAY
+    consecutive_failures = 0
 
     while not stop_event.is_set():
         cmd = [
@@ -288,35 +316,89 @@ def segmenter():
             pattern,
         ]
 
+        # Snapshot baseline files before launching FFmpeg so pre-existing segments
+        # from prior runs/incidents are never mistaken for output of this generation.
+        baseline_files = {}
+        for p in BUFFER_DIR.glob("*.ts"):
+            try:
+                st = p.stat()
+                baseline_files[p.name] = (st.st_size, st.st_mtime)
+            except OSError:
+                pass
+
         log("[ffmpeg] starting RTSP rolling segmenter")
         with lock:
-            proc_started_at = time.time()
+            ffmpeg_started_at = time.monotonic()
+            last_segment_at = None
+            stream_status = "starting"
             ffmpeg_proc = subprocess.Popen(cmd)
 
         stalled = False
+        startup_timed_out = False
+
         while not stop_event.is_set():
             rc = ffmpeg_proc.poll()
             if rc is not None:
                 break
 
-            now = time.time()
-            last_seg = latest_segment_time()
+            now_mono = time.monotonic()
 
-            if last_seg > 0:
-                if now - last_seg > STALL_THRESHOLD:
+            # Inspect buffer directory for new or modified segments produced by this generation
+            current_files = list(BUFFER_DIR.glob("*.ts"))
+            current_names = set()
+            has_new_activity = False
+
+            for p in current_files:
+                current_names.add(p.name)
+                try:
+                    st = p.stat()
+                    if st.st_size == 0:
+                        continue
+                    prev = baseline_files.get(p.name)
+                    if prev is None:
+                        # New segment file created by this generation!
+                        has_new_activity = True
+                        baseline_files[p.name] = (st.st_size, st.st_mtime)
+                    elif st.st_size > prev[0] or st.st_mtime > prev[1]:
+                        # Existing segment file actively updated by FFmpeg!
+                        has_new_activity = True
+                        baseline_files[p.name] = (st.st_size, st.st_mtime)
+                except OSError:
+                    pass
+
+            # Prune baseline entries for files deleted by cleanup_buffer
+            baseline_files = {k: v for k, v in baseline_files.items() if k in current_names}
+
+            with lock:
+                if has_new_activity:
+                    last_segment_at = now_mono
+                    stream_status = "healthy"
+                current_last_seg = last_segment_at
+
+            # Once the stream has been healthy and continuously streaming for >= 30s,
+            # reset the consecutive recovery failure counter and backoff.
+            if current_last_seg is not None and (now_mono - ffmpeg_started_at >= 30.0):
+                if consecutive_failures > 0:
+                    consecutive_failures = 0
+                    retry_delay = INITIAL_RETRY_DELAY
+
+            # Evaluate watchdog timeouts
+            if current_last_seg is None:
+                if now_mono - ffmpeg_started_at > STARTUP_TIMEOUT:
+                    log(
+                        f"[watchdog] WARNING: stream startup timed out (no segments produced in "
+                        f"{int(now_mono - ffmpeg_started_at)}s); killing FFmpeg"
+                    )
+                    startup_timed_out = True
+                    break
+            else:
+                if now_mono - current_last_seg > STALL_TIMEOUT:
                     log(
                         f"[watchdog] WARNING: stream stalled (no segment updates for "
-                        f"{int(now - last_seg)}s); killing FFmpeg"
+                        f"{int(now_mono - current_last_seg)}s); killing FFmpeg"
                     )
                     stalled = True
                     break
-            elif now - proc_started_at > STARTUP_GRACE_PERIOD:
-                log(
-                    f"[watchdog] WARNING: stream startup timed out (no segments produced in "
-                    f"{int(now - proc_started_at)}s); killing FFmpeg"
-                )
-                stalled = True
-                break
 
             time.sleep(1)
 
@@ -329,7 +411,7 @@ def segmenter():
                     ffmpeg_proc.kill()
             return
 
-        if stalled and ffmpeg_proc.poll() is None:
+        if (stalled or startup_timed_out) and ffmpeg_proc.poll() is None:
             ffmpeg_proc.terminate()
             try:
                 ffmpeg_proc.wait(timeout=5)
@@ -342,12 +424,25 @@ def segmenter():
                     pass
 
         rc = ffmpeg_proc.poll()
+        now_mono = time.monotonic()
 
-        run_duration = time.time() - proc_started_at
-        if run_duration >= 30.0 and latest_segment_time() > proc_started_at:
-            retry_delay = INITIAL_RETRY_DELAY
+        with lock:
+            ffmpeg_stopped_at = now_mono
+            ffmpeg_proc = None
+            stream_status = "stopped"
+            consecutive_failures += 1
 
-        log(f"[ffmpeg] exited rc={rc}; retrying in {int(retry_delay)} seconds")
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            log(
+                f"[watchdog] FATAL: stream recovery failed {consecutive_failures} consecutive times; "
+                "terminating process to trigger Supervisor container restart"
+            )
+            os._exit(1)
+
+        log(
+            f"[ffmpeg] exited rc={rc}; recovery attempt {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}; "
+            f"retrying in {int(retry_delay)} seconds"
+        )
         stop_event.wait(retry_delay)
         retry_delay = min(MAX_RETRY_DELAY, retry_delay * 2)
 

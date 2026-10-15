@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.3.2
+## 0.3.3
+
+- Treat every FFmpeg launch as an isolated generation with dedicated segment tracking (`last_segment_at = None`, `stream_status = "starting"`), preventing stale segment timestamps from prior runs causing immediate watchdog restart loops.
+- Use `time.monotonic()` for all watchdog durations, timeouts, and segment age tracking to guarantee monotonic timing regardless of system clock adjustments.
+- Provide a guaranteed 15–20s startup grace period (`STARTUP_TIMEOUT`) for every newly launched FFmpeg process before stall evaluations begin.
+- Add container restart escalation: after 3 consecutive failed FFmpeg recovery attempts, terminate the process (`os._exit(1)`) so Home Assistant Supervisor restarts the container to reset all container and tmpfs state.
+- Update `/health` endpoint to return HTTP 503 Service Unavailable when the stream has stalled or stopped beyond grace periods, while returning HTTP 200 during healthy streaming, startup, or brief initial reconnect backoff.
+- Add Supervisor `watchdog: "http://[HOST]:[PORT:8099]/health"` to `config.yaml` to enable native Supervisor watchdog container restarts when unhealthy.
+- Add Home Assistant REST binary sensor (`motion_recorder_stream_healthy`) and automated recovery automation examples (`hassio.app_restart`) to `home_assistant.yaml.example` and documentation.
+
 
 - Switch RTSP socket timeout to `-timeout 10000000` (replacing deprecated `-stimeout` removed in newer FFmpeg builds).
 

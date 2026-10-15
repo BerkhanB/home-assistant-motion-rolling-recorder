@@ -1,5 +1,5 @@
 name: Motion Rolling Recorder
-version: "0.3.2"
+version: "0.3.3"
 slug: motion_recorder
 description: Rolling RTSP pre-buffer recorder that creates one MP4 per motion incident.
 init: false
@@ -10,6 +10,7 @@ arch:
 startup: services
 boot: auto
 stage: experimental
+watchdog: "http://[HOST]:[PORT:8099]/health"
 
 map:
   - type: media

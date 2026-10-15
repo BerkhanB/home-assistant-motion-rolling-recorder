@@ -66,6 +66,17 @@ rest_command:
       Content-Type: application/json
     payload: "{}"
     timeout: 2
+
+# Optional health sensor (defense in depth):
+binary_sensor:
+  - platform: rest
+    name: Motion Recorder Stream Healthy
+    unique_id: motion_recorder_stream_healthy
+    resource: "http://HOME_ASSISTANT_IP:8099/health"
+    scan_interval: 30
+    timeout: 3
+    value_template: >
+      {{ value_json.ok | default(false) and value_json.stream_healthy | default(false) }}
 ```
 
 Then create an automation using your actual motion binary sensor:
@@ -81,6 +92,27 @@ Then create an automation using your actual motion binary sensor:
       to: "on"
   actions:
     - action: rest_command.motion_rolling_recorder_pulse
+
+# Optional auto-recovery automation:
+# Restarts the add-on/app if stream remains unhealthy for 60 seconds.
+- id: motion_recorder_auto_recover
+  alias: "Motion Recorder: Auto Recover"
+  description: Restart Motion Rolling Recorder if its stream remains unhealthy.
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.motion_recorder_stream_healthy
+      to: "off"
+      for: "00:01:00"
+    - trigger: state
+      entity_id: binary_sensor.motion_recorder_stream_healthy
+      to: "unavailable"
+      for: "00:01:00"
+  actions:
+    - action: hassio.app_restart
+      data:
+        app: b85c98ee_motion_recorder
+    - delay: "00:01:30"
 ```
 
 Restart Home Assistant (or reload REST commands where available) after adding
@@ -104,7 +136,7 @@ Restart Home Assistant (or reload REST commands where available) after adding
    Invoke-RestMethod -Uri "http://HOME_ASSISTANT_IP:8099/health"
    ```
 
-   The response indicates real-time streaming health:
+   The endpoint returns **HTTP 200** when healthy, starting up, or briefly reconnecting:
    ```json
    {
      "ok": true,
@@ -116,6 +148,7 @@ Restart Home Assistant (or reload REST commands where available) after adding
      "last_motion": null
    }
    ```
+   If the stream stalls or stops beyond the startup/reconnect grace periods, `/health` returns **HTTP 503 Service Unavailable** (with `"ok": false`, `"stream_healthy": false`, `"stream_status": "stalled"`).
 
 5. Trigger a pulse:
 
@@ -197,6 +230,15 @@ Incident finalization remuxes buffered segments into the final MP4 synchronously
   rendering succeeds or retries are exhausted.
 - If fresh motion pulses arrive while an older incident is rendering, the new
   motion pulse starts a distinct incident cleanly without race conditions.
+
+## Stream recovery & multi-tiered watchdog architecture
+
+The recorder implements four escalating layers of self-healing to prevent transient network drops or camera reboots from causing extended outages:
+
+1. **Level 1 (FFmpeg socket timeout)**: FFmpeg is configured with `-timeout 10000000` (10s) to abort hung RTSP socket reads if the camera stops responding without a clean TCP FIN.
+2. **Level 2 (Generation-isolated segment watchdog)**: The internal Python watchdog treats each FFmpeg launch as an isolated generation. Pre-existing buffer files are snapshotted so stale segment timestamps from prior runs can never poison a new FFmpeg process. Durations use `time.monotonic()`, giving each new process a 20-second startup window before stall checks (15s without new segment writes) engage.
+3. **Level 3 (Supervisor container restart escalation)**: If FFmpeg fails 3 consecutive times without recovering a healthy stream, the recorder process terminates with `os._exit(1)`. Home Assistant Supervisor automatically restarts the container, resetting all tmpfs and container states. In addition, `watchdog: "http://[HOST]:[PORT:8099]/health"` in `config.yaml` enables Supervisor's HTTP watchdog, which restarts the container if `/health` continues returning HTTP 503.
+4. **Level 4 (Home Assistant Core auto-recovery automation)**: As an independent safety net, Home Assistant Core polls `/health` via a REST binary sensor. If the sensor remains `off` or `unavailable` for 60 seconds, an automation issues `action: hassio.app_restart` to recover the add-on.
 
 ## Security
 
